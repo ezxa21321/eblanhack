@@ -1,34 +1,33 @@
 package com.airware.loader.ui
 
+import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.FolderOpen
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.Description
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.airware.loader.RootShell
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 const val BUILD_DIR = "/data/local/tmp"
 
@@ -38,66 +37,144 @@ fun FilesTab(
     onBuildSelected: (String) -> Unit,
     onLog: (String) -> Unit,
 ) {
-    var builds by remember { mutableStateOf<List<String>>(emptyList()) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var files by remember { mutableStateOf<List<String>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
 
     fun refresh() {
-        loading = true
-        val found = RootShell.listFiles(BUILD_DIR, "airware")
-        builds = found
-        loading = false
-        if (found.isEmpty()) onLog("no files containing 'airware' found in $BUILD_DIR")
-        else onLog("found ${found.size} build(s) in $BUILD_DIR")
+        scope.launch {
+            loading = true
+            val found = withContext(Dispatchers.IO) {
+                RootShell.listConfigsAndBuilds(BUILD_DIR)
+            }
+            files = found
+            loading = false
+            if (found.isEmpty()) onLog("Файлы (.cfg / .so) не найдены в $BUILD_DIR")
+            else onLog("Найдено файлов в $BUILD_DIR: ${found.size}")
+        }
+    }
+
+    // Лаунчер для выбора файла через системный проводник Android
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            loading = true
+            val fileName = getFileNameFromUri(context, uri) ?: "imported_config.cfg"
+            onLog("Импорт файла: $fileName...")
+
+            val success = withContext(Dispatchers.IO) {
+                try {
+                    val tempFile = File(context.cacheDir, fileName)
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        tempFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    val copied = RootShell.copyFileToDir(tempFile.absolutePath, BUILD_DIR, fileName)
+                    tempFile.delete()
+                    copied
+                } catch (e: Exception) {
+                    false
+                }
+            }
+
+            if (success) {
+                onLog("Файл $fileName успешно импортирован")
+                refresh()
+            } else {
+                loading = false
+                onLog("Ошибка импорта файла $fileName (проверьте права Root)")
+            }
+        }
     }
 
     LaunchedEffect(Unit) { refresh() }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (builds.isEmpty()) {
-            EmptyFilesState(loading = loading, onImport = { refresh() })
-        } else {
-            BuildsList(
-                builds = builds,
-                selected = selectedBuild,
-                onSelect = { file ->
-                    onBuildSelected("$BUILD_DIR/$file")
-                    onLog("selected build: $file")
-                },
-                onRefresh = { refresh() }
-            )
+    Scaffold(
+        floatingActionButton = {
+            if (files.isNotEmpty()) {
+                ExtendedFloatingActionButton(
+                    onClick = { filePickerLauncher.launch("*/*") },
+                    icon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    text = { Text("Импорт .cfg") },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        },
+        containerColor = MaterialTheme.colorScheme.background
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            if (loading) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else if (files.isEmpty()) {
+                EmptyFilesState(
+                    onImport = { filePickerLauncher.launch("*/*") },
+                    onRefresh = { refresh() }
+                )
+            } else {
+                BuildsList(
+                    builds = files,
+                    selected = selectedBuild,
+                    onSelect = { file ->
+                        onBuildSelected("$BUILD_DIR/$file")
+                        onLog("Выбран файл: $file")
+                    },
+                    onRefresh = { refresh() }
+                )
+            }
         }
     }
 }
 
+/** Получение реального имени файла из Uri (включая расширение .cfg) */
+private fun getFileNameFromUri(context: Context, uri: Uri): String? {
+    var name: String? = null
+    if (uri.scheme == "content") {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index != -1) name = cursor.getString(index)
+            }
+        }
+    }
+    if (name == null) {
+        name = uri.path?.substringAfterLast('/')
+    }
+    return name
+}
+
 @Composable
-private fun EmptyFilesState(loading: Boolean, onImport: () -> Unit) {
+private fun EmptyFilesState(onImport: () -> Unit, onRefresh: () -> Unit) {
     val cs = MaterialTheme.colorScheme
     Column(
-        modifier = Modifier.fillMaxSize(),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        AnimatedVisibility(
-            visible = true,
-            enter = fadeIn(tween(320)) + scaleIn(
-                initialScale = 0.7f,
-                animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-            )
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(168.dp)
-                    .background(cs.primaryContainer, ExpressiveShapeTokens.sunny),
-                contentAlignment = Alignment.Center
+        AnimatedVisibility(visible = true, enter = fadeIn() + scaleIn()) {
+            Surface(
+                modifier = Modifier.size(120.dp),
+                shape = MaterialTheme.shapes.extraLarge,
+                color = cs.secondaryContainer
             ) {
-                if (loading) {
-                    ExpressiveActivityIndicator(diameter = 64.dp, color = cs.onPrimaryContainer)
-                } else {
+                Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = Icons.Filled.FolderOpen,
+                        imageVector = Icons.Outlined.FolderOpen,
                         contentDescription = null,
-                        tint = cs.onPrimaryContainer,
-                        modifier = Modifier.size(62.dp)
+                        tint = cs.onSecondaryContainer,
+                        modifier = Modifier.size(56.dp)
                     )
                 }
             }
@@ -105,30 +182,39 @@ private fun EmptyFilesState(loading: Boolean, onImport: () -> Unit) {
 
         Spacer(modifier = Modifier.height(24.dp))
         Text(
-            text = if (loading) "Сканирование..." else "Пусто",
+            text = "Конфигурации не найдены",
             color = cs.onBackground,
-            style = MaterialTheme.typography.headlineSmall
+            style = MaterialTheme.typography.headlineSmall,
+            textAlign = TextAlign.Center
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "Импортируйте конфигурации — они появятся здесь.",
+            text = "Импортируйте файлы .cfg из памяти устройства — они будут скопированы в рабочую директорию.",
             color = cs.onSurfaceVariant,
             style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.padding(horizontal = 40.dp),
-            textAlign = TextAlign.Center
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp)
         )
 
         Spacer(modifier = Modifier.height(28.dp))
-        Button(
-            onClick = onImport,
-            shape = RoundedCornerShape(50),
-            colors = ButtonDefaults.buttonColors(containerColor = cs.primary, contentColor = cs.onPrimary),
-            contentPadding = PaddingValues(horizontal = 28.dp, vertical = 8.dp),
-            modifier = Modifier.height(52.dp)
-        ) {
-            Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Импорт конфигурации", style = MaterialTheme.typography.labelLarge)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FilledTonalButton(
+                onClick = onRefresh,
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Обновить")
+            }
+
+            Button(
+                onClick = onImport,
+                contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp)
+            ) {
+                Icon(Icons.Filled.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Импорт .cfg")
+            }
         }
     }
 }
@@ -143,21 +229,27 @@ private fun BuildsList(
     val cs = MaterialTheme.colorScheme
     Column(modifier = Modifier.fillMaxSize()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                "Конфигурации",
-                color = cs.onBackground,
-                style = MaterialTheme.typography.titleLarge,
+                text = "Доступные файлы (${builds.size})",
+                color = cs.onSurfaceVariant,
+                style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier.weight(1f)
             )
-            FilledTonalIconButton(onClick = onRefresh) {
-                Icon(Icons.Filled.Refresh, contentDescription = "Refresh")
+            IconButton(onClick = onRefresh) {
+                Icon(Icons.Filled.Refresh, contentDescription = "Обновить", tint = cs.onSurfaceVariant)
             }
         }
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(builds) { file ->
+
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 88.dp)
+        ) {
+            items(builds, key = { it }) { file ->
                 val isSelected = selected?.substringAfterLast('/') == file
                 BuildRow(file = file, selected = isSelected, onClick = { onSelect(file) })
             }
@@ -168,57 +260,50 @@ private fun BuildsList(
 @Composable
 private fun BuildRow(file: String, selected: Boolean, onClick: () -> Unit) {
     val cs = MaterialTheme.colorScheme
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.97f else 1f,
-        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
-        label = "rowPress"
-    )
-    val container by animateColorAsState(
-        targetValue = if (selected) cs.primaryContainer else cs.surfaceContainer,
-        animationSpec = tween(220), label = "rowBg"
-    )
-    val onContainer = if (selected) cs.onPrimaryContainer else cs.onSurface
+    val isCfg = file.endsWith(".cfg", ignoreCase = true)
 
-    Surface(
+    OutlinedCard(
+        onClick = onClick,
         shape = MaterialTheme.shapes.large,
-        color = container,
-        modifier = Modifier
-            .fillMaxWidth()
-            .scale(scale)
-            .clickable(interactionSource = interaction, indication = null) { onClick() }
+        colors = CardDefaults.outlinedCardColors(
+            containerColor = if (selected) cs.secondaryContainer else cs.surfaceContainerLow
+        ),
+        border = CardDefaults.outlinedCardBorder(enabled = !selected)
     ) {
-        Row(
-            modifier = Modifier.padding(14.dp).fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(
-                        if (selected) cs.primary.copy(alpha = 0.22f) else cs.surfaceContainerHighest,
-                        ExpressiveShapeTokens.cookie
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    Icons.Filled.Description,
-                    contentDescription = null,
-                    tint = if (selected) cs.primary else cs.onSurfaceVariant,
-                    modifier = Modifier.size(20.dp)
+        ListItem(
+            headlineContent = {
+                Text(
+                    text = file,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    style = MaterialTheme.typography.titleMedium
                 )
-            }
-            Spacer(modifier = Modifier.width(14.dp))
-            Text(
-                file,
-                color = onContainer,
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.weight(1f)
-            )
-            if (selected) {
-                Icon(Icons.Filled.Check, contentDescription = "Выбрано", tint = cs.primary, modifier = Modifier.size(22.dp))
-            }
-        }
+            },
+            supportingContent = {
+                Text(
+                    text = if (isCfg) "Файл конфигурации (.cfg)" else "Библиотека / Билд",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            leadingContent = {
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = if (selected) cs.primary else cs.surfaceContainerHighest,
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = if (isCfg) Icons.Filled.SettingsApplications else Icons.Outlined.Description,
+                            contentDescription = null,
+                            tint = if (selected) cs.onPrimary else cs.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            trailingContent = {
+                RadioButton(selected = selected, onClick = onClick)
+            },
+            colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
+        )
     }
 }
