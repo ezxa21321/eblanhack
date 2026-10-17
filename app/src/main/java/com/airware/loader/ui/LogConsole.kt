@@ -1,0 +1,117 @@
+package com.airware.loader.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
+
+enum class LogLevel(val tag: String) {
+    INFO("INFO"),
+    SUCCESS("OK"),
+    WARN("WARN"),
+    ERROR("CRIT")
+}
+
+// Фиксированные цвета уровней — одинаковы в обеих темах (зелёный/жёлтый/красный должны
+// оставаться узнаваемыми независимо от фона).
+fun levelColor(level: LogLevel): Color = when (level) {
+    LogLevel.INFO -> Color(0xFF9E9EA8)
+    LogLevel.SUCCESS -> Color(0xFF4CAF50)
+    LogLevel.WARN -> Color(0xFFF9A825)
+    LogLevel.ERROR -> Color(0xFFE53935)
+}
+
+data class LogEntry(val level: LogLevel, val message: String, val timeMs: Long = System.currentTimeMillis())
+
+class LogState {
+    val entries = mutableStateListOf<LogEntry>()
+
+    fun push(level: LogLevel, message: String) {
+        entries.add(LogEntry(level, message))
+        if (entries.size > 300) entries.removeAt(0)
+    }
+
+    fun info(msg: String) = push(LogLevel.INFO, msg)
+    fun success(msg: String) = push(LogLevel.SUCCESS, msg)
+    fun warn(msg: String) = push(LogLevel.WARN, msg)
+    fun error(msg: String) = push(LogLevel.ERROR, msg)
+}
+
+@Composable
+fun rememberLogState(): LogState = remember { LogState() }
+
+@Composable
+fun LogWindow(state: LogState, modifier: Modifier = Modifier) {
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    val cs = MaterialTheme.colorScheme
+
+    LaunchedEffect(state.entries.size) {
+        if (state.entries.isNotEmpty()) {
+            scope.launch { listState.animateScrollToItem(state.entries.size - 1) }
+        }
+    }
+
+    Column(
+        modifier = modifier
+            .background(cs.surfaceVariant, RoundedCornerShape(20.dp))
+            .padding(14.dp)
+    ) {
+        Text(
+            text = "LOG",
+            color = cs.onSurfaceVariant,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        if (state.entries.isEmpty()) {
+            Text(
+                text = "// waiting...",
+                color = cs.onSurfaceVariant,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace
+            )
+        } else {
+            // heightIn бound обязателен: Column здесь не передаёт ограниченную высоту,
+            // и LazyColumn падает с "vertically unbounded" без явного максимума.
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)
+            ) {
+                items(state.entries) { entry ->
+                    LogLine(entry, textColor = cs.onSurface)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LogLine(entry: LogEntry, textColor: Color) {
+    Row(modifier = Modifier.padding(vertical = 2.dp)) {
+        Text(
+            text = "[${entry.level.tag}]",
+            color = levelColor(entry.level),
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = entry.message,
+            color = textColor,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
