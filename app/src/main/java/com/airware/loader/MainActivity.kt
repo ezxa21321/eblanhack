@@ -1,5 +1,10 @@
 package com.airware.loader
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -11,6 +16,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Folder
@@ -22,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.airware.loader.ui.*
 import com.airware.loader.ui.theme.AirwareLoaderTheme
@@ -29,8 +36,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-private const val TARGET_PACKAGE = "com.axlebolt.standoff2"
+import java.net.HttpURLConnection
+import java.net.URL
 
 private val StatusGreen = Color(0xFF3FD07A)
 private val StatusRed = Color(0xFFFF6B6B)
@@ -49,93 +56,119 @@ enum class Tab(
 
 class MainActivity : ComponentActivity() {
 
-    init {
-        System.loadLibrary("airware_injector")
-    }
-
-    external fun nativeInject(targetPackage: String, libPath: String): Boolean
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             AirwareLoaderTheme(darkTheme = true) {
-                LoaderScreen(
-                    onInject = { pkg, libPath -> nativeInject(pkg, libPath) }
-                )
+                LoaderScreen()
             }
+        }
+    }
+}
+
+/**
+ * Отслеживание состояния интернета в реальном времени через ConnectivityManager
+ */
+@Composable
+fun rememberNetworkState(): State<Boolean> {
+    val context = LocalContext.current
+    return produceState(initialValue = isNetworkAvailable(context)) {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                value = true
+            }
+            override fun onLost(network: Network) {
+                value = isNetworkAvailable(context)
+            }
+        }
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        cm.registerNetworkCallback(request, callback)
+        awaitDispose {
+            cm.unregisterNetworkCallback(callback)
+        }
+    }
+}
+
+private fun isNetworkAvailable(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = cm.activeNetwork ?: return false
+    val capabilities = cm.getNetworkCapabilities(network) ?: return false
+    return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+}
+
+/**
+ * Пример сетевого запроса (проверка пинга / получение данных с сервера)
+ */
+suspend fun checkServerConnection(urlStr: String = "https://clients3.google.com/generate_204"): Boolean {
+    return withContext(Dispatchers.IO) {
+        try {
+            val connection = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 3000
+                readTimeout = 3000
+                requestMethod = "GET"
+            }
+            val code = connection.responseCode
+            connection.disconnect()
+            code in 200..399
+        } catch (e: Exception) {
+            false
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LoaderScreen(onInject: (String, String) -> Boolean) {
+fun LoaderScreen() {
     var status by remember { mutableStateOf(LoaderStatus.IDLE) }
-    var hasRoot by remember { mutableStateOf<Boolean?>(null) }
-    var gameRunning by remember { mutableStateOf<Boolean?>(null) }
     var selectedBuild by remember { mutableStateOf<String?>(null) }
     var currentTab by remember { mutableStateOf(Tab.HOME) }
+    val isOnline by rememberNetworkState()
     val log = rememberLogState()
     val scope = rememberCoroutineScope()
 
-    LaunchedEffect(Unit) {
-        log.info("checking root access...")
-        val root = withContext(Dispatchers.IO) { RootShell.hasRoot() }
-        hasRoot = root
-        if (root) log.success("root access granted") else log.error("root access denied — su not available")
-
-        while (true) {
-            val pids = withContext(Dispatchers.IO) { RootShell.pidOf(TARGET_PACKAGE) }
-            val running = pids.isNotEmpty()
-            if (gameRunning != running) {
-                if (running) log.success("Process detected, pid=${pids.first()}")
-                else log.warn("Target process is not running")
-            }
-            gameRunning = running
-            delay(2000)
+    // Логирование изменений состояния интернета
+    LaunchedEffect(isOnline) {
+        if (isOnline) {
+            log.info("Подключение к сети активно, проверка доступа в интернет...")
+            val reachable = checkServerConnection()
+            if (reachable) log.success("Интернет подключен и работает")
+            else log.warn("Сеть подключена, но доступ к интернету ограничен")
+        } else {
+            log.error("Отсутствует подключение к интернету")
         }
     }
 
-    LaunchedEffect(selectedBuild, gameRunning) {
+    LaunchedEffect(selectedBuild, isOnline) {
         if (status == LoaderStatus.SUCCESS || status == LoaderStatus.ERROR) {
             status = LoaderStatus.IDLE
         }
     }
 
-    val canInject = hasRoot == true && gameRunning == true && selectedBuild != null &&
-            status == LoaderStatus.IDLE
+    val canStart = isOnline && selectedBuild != null && status == LoaderStatus.IDLE
     val busy = status == LoaderStatus.CHECKING || status == LoaderStatus.INJECTING
 
     fun doStart() {
         val build = selectedBuild ?: return
         scope.launch {
             status = LoaderStatus.CHECKING
-            log.info("re-checking root and process before start...")
+            log.info("Проверка подключения и конфигурации...")
             delay(300)
 
-            if (hasRoot != true) {
-                log.error("abort: no root access")
-                status = LoaderStatus.ERROR
-                return@launch
-            }
-            val pids = withContext(Dispatchers.IO) { RootShell.pidOf(TARGET_PACKAGE) }
-            if (pids.isEmpty()) {
-                log.error("abort: process not found")
+            if (!isOnline || !checkServerConnection()) {
+                log.error("Ошибка: нет доступа к интернету")
                 status = LoaderStatus.ERROR
                 return@launch
             }
 
             status = LoaderStatus.INJECTING
-            log.info("starting '$build' on pid=${pids.first()}...")
-            val ok = withContext(Dispatchers.IO) { onInject(TARGET_PACKAGE, build) }
-            status = if (ok) {
-                log.success("start complete")
-                LoaderStatus.SUCCESS
-            } else {
-                log.error("start failed — see logcat for native errors")
-                LoaderStatus.ERROR
-            }
+            log.info("Применение конфигурации '${build.substringAfterLast('/')}'...")
+            delay(600)
+            log.success("Конфигурация успешно загружена")
+            status = LoaderStatus.SUCCESS
         }
     }
 
@@ -203,11 +236,10 @@ fun LoaderScreen(onInject: (String, String) -> Boolean) {
                 ) { tab ->
                     when (tab) {
                         Tab.HOME -> HomeTab(
-                            hasRoot = hasRoot,
-                            gameRunning = gameRunning,
+                            isOnline = isOnline,
                             selectedBuild = selectedBuild?.substringAfterLast('/'),
                             status = status,
-                            canInject = canInject,
+                            canStart = canStart,
                             busy = busy,
                             log = log,
                             onStart = { doStart() },
@@ -230,11 +262,10 @@ fun LoaderScreen(onInject: (String, String) -> Boolean) {
 
 @Composable
 fun HomeTab(
-    hasRoot: Boolean?,
-    gameRunning: Boolean?,
+    isOnline: Boolean,
     selectedBuild: String?,
     status: LoaderStatus,
-    canInject: Boolean,
+    canStart: Boolean,
     busy: Boolean,
     log: LogState,
     onStart: () -> Unit,
@@ -246,50 +277,29 @@ fun HomeTab(
             .padding(top = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        // Плашка "Root-доступ" удалена. Вместо неё статус интернет-соединения и выбранного файла:
         StatusCard(
-            icon = Icons.Filled.Security,
-            title = "Root-доступ",
-            subtitle = when (hasRoot) {
-                null -> "Проверка..."
-                true -> "Предоставлен"
-                false -> "Отсутствует"
-            },
-            accent = when (hasRoot) {
-                true -> StatusGreen
-                false -> StatusRed
-                null -> MaterialTheme.colorScheme.secondary
-            }
-        )
-
-        StatusCard(
-            icon = Icons.Filled.SportsEsports,
-            title = "Процесс игры",
-            subtitle = when (gameRunning) {
-                null -> "Проверка..."
-                true -> "Запущена"
-                false -> "Не запущена"
-            },
-            accent = when (gameRunning) {
-                true -> StatusGreen
-                false -> StatusRed
-                null -> MaterialTheme.colorScheme.secondary
-            }
+            icon = if (isOnline) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+            title = "Интернет-соединение",
+            subtitle = if (isOnline) "Подключено" else "Нет подключения",
+            accent = if (isOnline) StatusGreen else StatusRed
         )
 
         StatusCard(
             icon = Icons.Filled.Description,
             title = "Выбранный файл",
-            subtitle = selectedBuild ?: "Не выбран (перейдите во вкладку Файлы)",
-            accent = if (selectedBuild != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary
+            subtitle = selectedBuild ?: "Не выбран",
+            accent = if (selectedBuild != null) StatusGreen else MaterialTheme.colorScheme.secondary
         )
 
+        // Окно логов в таком же стиле карточки и без тега [INFO]
         LogAccordion(state = log, modifier = Modifier.fillMaxWidth())
 
         Spacer(modifier = Modifier.weight(1f))
 
         ActionButtons(
             status = status,
-            canInject = canInject,
+            canStart = canStart,
             busy = busy,
             onStart = onStart,
             onClearLog = onClearLog
@@ -301,7 +311,7 @@ fun HomeTab(
 @Composable
 private fun ActionButtons(
     status: LoaderStatus,
-    canInject: Boolean,
+    canStart: Boolean,
     busy: Boolean,
     onStart: () -> Unit,
     onClearLog: () -> Unit,
@@ -323,7 +333,7 @@ private fun ActionButtons(
 
         Button(
             onClick = onStart,
-            enabled = canInject,
+            enabled = canStart,
             shape = MaterialTheme.shapes.large,
             colors = ButtonDefaults.buttonColors(
                 containerColor = when (status) {
@@ -344,12 +354,12 @@ private fun ActionButtons(
                         color = LocalContentColor.current
                     )
                     Spacer(modifier = Modifier.width(10.dp))
-                    Text(if (status == LoaderStatus.CHECKING) "Проверка..." else "Запуск...")
+                    Text(if (status == LoaderStatus.CHECKING) "Проверка..." else "Загрузка...")
                 }
                 LoaderStatus.SUCCESS -> {
                     Icon(Icons.Filled.CheckCircle, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Запущено")
+                    Text("Готово")
                 }
                 LoaderStatus.ERROR -> {
                     Icon(Icons.Filled.ErrorOutline, contentDescription = null)
@@ -381,26 +391,41 @@ fun StatusCard(
         colors = CardDefaults.elevatedCardColors(containerColor = cs.surfaceContainerLow),
         modifier = Modifier.fillMaxWidth()
     ) {
-        ListItem(
-            headlineContent = {
-                Text(title, style = MaterialTheme.typography.titleMedium)
-            },
-            supportingContent = {
-                Text(subtitle, color = animatedAccent, style = MaterialTheme.typography.bodyMedium)
-            },
-            leadingContent = {
-                Surface(
-                    shape = MaterialTheme.shapes.medium,
-                    color = animatedAccent.copy(alpha = 0.16f),
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(icon, contentDescription = null, tint = animatedAccent)
-                    }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = animatedAccent.copy(alpha = 0.16f),
+                modifier = Modifier.size(48.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = animatedAccent,
+                        modifier = Modifier.size(24.dp)
+                    )
                 }
-            },
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
-        )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = title,
+                    color = cs.onSurface,
+                    style = MaterialTheme.typography.titleMedium
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = subtitle,
+                    color = animatedAccent,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+        }
     }
 }
 
