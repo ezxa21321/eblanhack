@@ -1,0 +1,56 @@
+name: EblanHack CI Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build EblanHack APK (Release & Debug)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Accept Android SDK Licenses & Install NDK/CMake
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install \
+            "ndk;27.0.12077973" \
+            "cmake;3.22.1" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Apply EblanHack Rename & Fix Imports
+        run: |
+          chmod +x rename.sh
+          ./rename.sh
+
+      - name: Build Release APK (ProGuard/R8 Obfuscated)
+        run: gradle assembleRelease --console=plain
+
+      - name: Collect Output APKs
+        run: |
+          mkdir -p artifacts
+          find app/build/outputs/apk/release -name "*.apk" -exec cp {} artifacts/EblanHack-Release-Obfuscated.apk \;
+      - name: Upload EblanHack APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: EblanHack-Builds
+          path: artifacts/*.apk
+          retention-days: 30
