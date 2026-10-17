@@ -12,24 +12,23 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Terminal
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
-// Сворачиваемая панель "Логи" с шевроном, повёрнутым на 180° при раскрытии (пружинно).
+private val LogAccentGreen = Color(0xFF3FD07A)
+
 @Composable
 fun LogAccordion(state: LogState, modifier: Modifier = Modifier) {
     var expanded by remember { mutableStateOf(false) }
@@ -48,14 +47,15 @@ fun LogAccordion(state: LogState, modifier: Modifier = Modifier) {
         }
     }
 
-    Surface(
+    ElevatedCard(
         shape = MaterialTheme.shapes.large,
-        color = cs.surfaceContainer,
+        colors = CardDefaults.elevatedCardColors(containerColor = cs.surfaceContainerLow),
         modifier = modifier
             .fillMaxWidth()
             .animateContentSize(animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
+            // Шапка в стиле карточки со скриншота
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -63,43 +63,40 @@ fun LogAccordion(state: LogState, modifier: Modifier = Modifier) {
                         indication = null,
                         interactionSource = remember { MutableInteractionSource() }
                     ) { expanded = !expanded }
-                    .padding(horizontal = 18.dp, vertical = 16.dp),
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(36.dp)
-                        .background(cs.tertiaryContainer, ExpressiveShapeTokens.cookie),
-                    contentAlignment = Alignment.Center
+                Surface(
+                    shape = CircleShape,
+                    color = LogAccentGreen.copy(alpha = 0.16f),
+                    modifier = Modifier.size(48.dp)
                 ) {
-                    Icon(
-                        Icons.Filled.Terminal,
-                        contentDescription = null,
-                        tint = cs.onTertiaryContainer,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Text(
-                    text = "Логи",
-                    color = cs.onSurface,
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.weight(1f)
-                )
-                if (state.entries.isNotEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .background(cs.secondaryContainer, RoundedCornerShape(50))
-                            .padding(horizontal = 10.dp, vertical = 3.dp)
-                    ) {
-                        Text(
-                            text = "${state.entries.size}",
-                            color = cs.onSecondaryContainer,
-                            style = MaterialTheme.typography.labelMedium
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Filled.Terminal,
+                            contentDescription = null,
+                            tint = LogAccentGreen,
+                            modifier = Modifier.size(24.dp)
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
                 }
+
+                Spacer(modifier = Modifier.width(16.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Логи",
+                        color = cs.onSurface,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = if (state.entries.isEmpty()) "Ожидание событий..." else "Записей: ${state.entries.size}",
+                        color = LogAccentGreen,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
                 Icon(
                     imageVector = Icons.Filled.KeyboardArrowDown,
                     contentDescription = null,
@@ -116,9 +113,9 @@ fun LogAccordion(state: LogState, modifier: Modifier = Modifier) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 260.dp)
-                        .padding(horizontal = 18.dp)
-                        .padding(bottom = 18.dp)
+                        .heightIn(max = 240.dp)
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 16.dp)
                 ) {
                     Box(
                         modifier = Modifier
@@ -128,7 +125,7 @@ fun LogAccordion(state: LogState, modifier: Modifier = Modifier) {
                     ) {
                         if (state.entries.isEmpty()) {
                             Text(
-                                text = "// waiting...",
+                                text = "// пусто...",
                                 color = cs.onSurfaceVariant,
                                 fontSize = 12.sp,
                                 fontFamily = FontFamily.Monospace
@@ -137,16 +134,19 @@ fun LogAccordion(state: LogState, modifier: Modifier = Modifier) {
                             LazyColumn(state = listState) {
                                 items(state.entries) { entry ->
                                     Row(modifier = Modifier.padding(vertical = 2.dp)) {
-                                        Text(
-                                            text = "[${entry.level.tag}]",
-                                            color = levelColor(entry.level),
-                                            fontSize = 12.sp,
-                                            fontFamily = FontFamily.Monospace,
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
+                                        // Убираем [INFO], выводим тег только для остальных уровней
+                                        if (entry.level != LogLevel.INFO) {
+                                            Text(
+                                                text = "[${entry.level.tag}]",
+                                                color = levelColor(entry.level),
+                                                fontSize = 12.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                        }
                                         Text(
                                             text = entry.message,
-                                            color = cs.onSurface,
+                                            color = if (entry.level == LogLevel.INFO) cs.onSurface else levelColor(entry.level),
                                             fontSize = 12.sp,
                                             fontFamily = FontFamily.Monospace,
                                         )
